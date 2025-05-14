@@ -1,0 +1,7 @@
+streamlit
+streamlit-calendar
+PyMuPDF
+python-dateutil
+ics
+fpdf
+pandas
