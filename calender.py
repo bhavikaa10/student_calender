@@ -1,137 +1,203 @@
-import streamlit as st
-import fitz  # PyMuPDF
-from dateutil import parser
-import re
-from ics import Calendar, Event
-from fpdf import FPDF
-import pandas as pd
-import datetime
-from streamlit_calendar import calendar          # pip install streamlit-calendar
 
-# helper functions:
-from streamlit_calendar import calendar             # import the component
+# ───────────────────────────── Imports ────────────────────────────────────
+import streamlit as st              # UI framework
+import fitz                         # PDF parsing (PyMuPDF)
+from dateutil import parser         # Robust natural‑language date parser
+import re                           # Regex for date + "Week N" detection
+from ics import Calendar, Event     # Build exportable .ics file
+from fpdf import FPDF               # Quick PDF list export
+import pandas as pd                 # Tabular storage / sorting
+import datetime as dt               # Date arithmetic for Week‑offsets
+from streamlit_calendar import calendar  # FullCalendar → Streamlit wrapper
 
-def df_to_fullcalendar(df):
-    """Convert your Pandas DataFrame ➜ list[dict] for FullCalendar."""
+# ───────────────────────── Helper: DataFrame → FullCalendar ──────────────
+
+def df_to_fullcalendar(df: pd.DataFrame) -> list[dict]:
+    """Convert a two‑column DataFrame (Date, Event Description) to the small
+    JSON schema FullCalendar expects.
+
+    FullCalendar ignores any extra keys, so you can add `url`, `color`, etc.
+    later if desired.
+    """
     return [
         {
-            "title": row["Event Description"][:80],        # trim long text
-            "start": row["Date"],                          # YYYY-MM-DD
-            # optional extras: "url", "backgroundColor", etc.
+            "title": row["Event Description"][:80],  # 80‑char clip to keep pills tidy
+            "start": row["Date"],                   # ISO‑date string "YYYY‑MM‑DD"
         }
         for _, row in df.iterrows()
     ]
 
-# ------------ UTILITY FUNCTIONS ------------
+# ═══════════════════════════ Text extraction ════════════════════════════
 
-def extract_text_from_pdf(file):
+def extract_text_from_pdf(file) -> str:
+    """Return *all* text from a PDF file‑like object using PyMuPDF."""
     doc = fitz.open(stream=file.read(), filetype="pdf")
-    return "\n".join([page.get_text() for page in doc])
+    return "\n".join(page.get_text() for page in doc)
 
-def extract_dates(text):
-    date_strings = re.findall(r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+ \d{1,2}, \d{4})\b', text)
-    unique = set()
+# ══════════════════════════ Date‑parsing helpers ═════════════════════════
+
+ABS_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+ \d{1,2}, \d{4})\b",
+    re.I,
+)  # matches 02/28/25, 2-28-2025, Feb 28, 2025 …
+
+WEEK_RE = re.compile(r"\bweek\s*(\d{1,2})\b", re.I)
+
+
+def extract_dates(text: str) -> list[tuple[dt.datetime, str]]:
+    """Find *absolute* date strings and return list[(datetime, original_text)]."""
+    unique: set[dt.datetime] = set()
     events = []
-    for ds in date_strings:
+    for ds in ABS_DATE_RE.findall(text):
         try:
-            dt = parser.parse(ds, fuzzy=True)
-            if dt not in unique:
-                unique.add(dt)
-                events.append((dt, ds))
-        except:
+            dt_val = parser.parse(ds, fuzzy=True)
+            if dt_val not in unique:
+                unique.add(dt_val)
+                events.append((dt_val, ds))
+        except Exception:  # parser failed
             pass
     return events
 
-def find_event_context(text, keyword, window=80):
-    index = text.lower().find(keyword.lower())
-    if index == -1:
+
+def find_event_context(text: str, keyword: str, window: int = 80) -> str:
+    """Return ±*window* chars around *keyword* so we have a title snippet."""
+    idx = text.lower().find(keyword.lower())
+    if idx == -1:
         return "Event"
-    start = max(0, index - window)
-    end = index + len(keyword) + window
+    start = max(0, idx - window)
+    end = idx + len(keyword) + window
     return text[start:end].replace("\n", " ").strip()
 
-def extract_week_based_events(text, semester_start):
+
+# Default: Week‑based events land on **Monday** of that week.
+# Set this to 3 if your tutorials are every Thursday, etc.
+WEEKDAY_OFFSET = 0  # 0=Mon, 1=Tue, 2=Wed …
+
+def extract_week_based_events(text: str, semester_start: dt.date) -> list[tuple[dt.date, str]]:
+    """Map every "Week N" mention to a concrete calendar date."""
     week_events = []
-    matches = re.finditer(r"\bweek\s*(\d{1,2})\b", text, re.IGNORECASE)
-    for match in matches:
+    for match in WEEK_RE.finditer(text):
         week_num = int(match.group(1))
-        event_date = semester_start + datetime.timedelta(days=(week_num - 1) * 7)
-        keyword = f"week {week_num}"
-        context = find_event_context(text, keyword)
-        week_events.append((event_date, keyword))
+        # Monday of Week N (or use offset)
+        event_date = semester_start + dt.timedelta(weeks=week_num - 1)
+        if WEEKDAY_OFFSET:
+            event_date += dt.timedelta(days=WEEKDAY_OFFSET)
+        label = f"week {week_num}"
+        week_events.append((event_date, label))
     return week_events
 
-def create_ics_file(events, full_text):
-    c = Calendar()
-    for date, label in events:
-        e = Event()
-        e.name = find_event_context(full_text, label)
-        e.begin = date
-        c.events.add(e)
-    return c
+# ═══════════════════════════ .ics + PDF export ══════════════════════════
 
-def generate_calendar_pdf(events, full_text):
+def create_ics_file(events: list[tuple[dt.date, str]], full_text: str) -> Calendar:
+    """Build and return an `ics.Calendar` object from event tuples."""
+    cal = Calendar()
+    for date_obj, label in events:
+        ev = Event()
+        ev.name = find_event_context(full_text, label)
+        ev.begin = date_obj.strftime("%Y-%m-%d")  # ICS prefers ISO strings
+        cal.events.add(ev)
+    return cal
+
+
+def generate_calendar_pdf(events: list[tuple[dt.date, str]], full_text: str) -> None:
+    """Save a very simple PDF list called *calendar.pdf* in the current dir."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="📅 Course Calendar", ln=True, align="C")
+    pdf.cell(0, 10, "Course Calendar", ln=True, align="C")
 
-    for date, label in events:
+    for date_obj, label in events:
         context = find_event_context(full_text, label)
-        event_text = f"{date.strftime('%Y-%m-%d')}: {context}"
-        pdf.multi_cell(0, 10, event_text)
+        # FPDF is Latin‑1 only → replace unsupported chars gracefully.
+        line = f"{date_obj.strftime('%Y-%m-%d')}: {context}".encode("latin-1", "replace").decode("latin-1")
+        pdf.multi_cell(0, 8, line)
 
     pdf.output("calendar.pdf")
 
-# ------------ STREAMLIT INTERFACE ------------
+# ═════════════════════════ Streamlit UI begins ══════════════════════════
 
 st.title("📘 Syllabus → Smart Calendar")
-st.write("Upload your syllabus PDF and get a personalized calendar with key dates and deadlines.")
+
+st.write(
+    "Upload a course syllabus PDF and get an interactive calendar plus optional\n"
+    "downloads (ICS / PDF).  Absolute dates are detected automatically;\n"
+    "'Week N' references are mapped from the semester start date you pick."
+)
 
 uploaded_file = st.file_uploader("📎 Upload syllabus (PDF)", type="pdf")
 semester_start = st.date_input("📅 Semester Start Date")
 semester_end = st.date_input("📅 Semester End Date")
 
 if uploaded_file and semester_start and semester_end:
-    text = extract_text_from_pdf(uploaded_file)
+    # 1️⃣ Read PDF text
+    raw_text = extract_text_from_pdf(uploaded_file)
 
-    # Absolute + Week-based Dates
-    absolute_dates = extract_dates(text)
-    week_dates = extract_week_based_events(text, semester_start)
-    all_events = absolute_dates + week_dates
+    # 2️⃣ Parse dates (absolute + Week‑based)
+    abs_dates = extract_dates(raw_text)
+    week_dates = extract_week_based_events(raw_text, semester_start)
+    all_events = abs_dates + week_dates
 
     if not all_events:
         st.warning("❌ No valid deadlines or week references found.")
-    else:
-        calendar_df = pd.DataFrame({
-            "Date": [d.strftime("%Y-%m-%d") for d, label in all_events],
-            "Event Description": [find_event_context(text, label) for d, label in all_events]
-        }).sort_values("Date")
+        st.stop()
 
-        # ──── NEW interactive calendar section ────
-        st.subheader("🗓️ Interactive Calendar")
-
-        # optional: keep the raw table in a collapsible expander
-        with st.expander("Show raw event table", expanded=False):
-            st.dataframe(calendar_df, height=300)
-
-        events_json = df_to_fullcalendar(calendar_df)
-
-        cal_options = {
-            "initialView": "dayGridMonth",
-            "height": "auto",
-            "headerToolbar": {
-                "left":   "today prev,next",
-                "center": "title",
-                "right":  "dayGridMonth,timeGridWeek,listMonth",
-            },
-        }
-
-        _ = calendar(
-                events  = events_json,
-                options = cal_options,
-                key     = "course_calendar"
+    # 3️⃣ Build DataFrame for display / export
+    df = (
+        pd.DataFrame(
+            {
+                "Date": [d.strftime("%Y-%m-%d") for d, _ in all_events],
+                "Event Description": [find_event_context(raw_text, lbl) for _, lbl in all_events],
+            }
         )
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+
+    # 4️⃣ Interactive calendar (FullCalendar)
+    st.subheader("🗓️ Interactive Calendar")
+
+    with st.expander("Show raw event table", expanded=False):
+        st.dataframe(df, height=300)
+
+    events_json = df_to_fullcalendar(df)
+
+    # Basic FC options; tweak as needed
+    cal_options = {
+        "initialView": "dayGridMonth",
+        "height": "auto",
+        "headerToolbar": {
+            "left": "today prev,next",
+            "center": "title",
+            "right": "dayGridMonth,timeGridWeek,listMonth",
+        },
+        "firstDay": 1,  # weeks start on Monday
+    }
+
+    # Render the calendar component
+    _ = calendar(events=events_json, options=cal_options, key="course_calendar")
+
+    # 5️⃣ Downloads
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        if st.button("📥 Create .ics file"):
+            ics_cal = create_ics_file(all_events, raw_text)
+            st.download_button(
+                "⬇️ Download .ics",
+                data=ics_cal.serialize().encode(),
+                mime="text/calendar",
+                file_name="course_calendar.ics",
+            )
+    with col_dl2:
+        if st.button("🖨️ Create PDF list"):
+            generate_calendar_pdf(all_events, raw_text)
+            with open("calendar.pdf", "rb") as f:
+                st.download_button(
+                    "⬇️ Download PDF",
+                    data=f,
+                    mime="application/pdf",
+                    file_name="course_calendar.pdf",
+                )
+
 
         if st.button("📥 Download .ics Calendar File"):
             calendar = create_ics_file(all_events, text)
