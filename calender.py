@@ -6,6 +6,21 @@ from ics import Calendar, Event
 from fpdf import FPDF
 import pandas as pd
 import datetime
+from streamlit_calendar import calendar          # pip install streamlit-calendar
+
+# helper functions:
+from streamlit_calendar import calendar             # import the component
+
+def df_to_fullcalendar(df):
+    """Convert your Pandas DataFrame ➜ list[dict] for FullCalendar."""
+    return [
+        {
+            "title": row["Event Description"][:80],        # trim long text
+            "start": row["Date"],                          # YYYY-MM-DD
+            # optional extras: "url", "backgroundColor", etc.
+        }
+        for _, row in df.iterrows()
+    ]
 
 # ------------ UTILITY FUNCTIONS ------------
 
@@ -91,10 +106,32 @@ if uploaded_file and semester_start and semester_end:
         calendar_df = pd.DataFrame({
             "Date": [d.strftime("%Y-%m-%d") for d, label in all_events],
             "Event Description": [find_event_context(text, label) for d, label in all_events]
-        })
+        }).sort_values("Date")
 
-        st.write("🗓️ **Generated Calendar:**")
-        st.dataframe(calendar_df)
+        # ──── NEW interactive calendar section ────
+        st.subheader("🗓️ Interactive Calendar")
+
+        # optional: keep the raw table in a collapsible expander
+        with st.expander("Show raw event table", expanded=False):
+            st.dataframe(calendar_df, height=300)
+
+        events_json = df_to_fullcalendar(calendar_df)
+
+        cal_options = {
+            "initialView": "dayGridMonth",
+            "height": "auto",
+            "headerToolbar": {
+                "left":   "today prev,next",
+                "center": "title",
+                "right":  "dayGridMonth,timeGridWeek,listMonth",
+            },
+        }
+
+        _ = calendar(
+                events  = events_json,
+                options = cal_options,
+                key     = "course_calendar"
+        )
 
         if st.button("📥 Download .ics Calendar File"):
             calendar = create_ics_file(all_events, text)
