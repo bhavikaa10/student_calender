@@ -43,19 +43,19 @@ ABS_DATE_RE = re.compile(
 
 WEEK_RE = re.compile(r"\bweek\s*(\d{1,2})\b", re.I)
 
+def iter_lines(text):
+    for line in text.splitlines():
+        yield line.strip()
 
-def extract_dates(text: str) -> list[tuple[dt.datetime, str]]:
-    """Find *absolute* date strings and return list[(datetime, original_text)]."""
-    unique: set[dt.datetime] = set()
+def extract_dates(text):
     events = []
-    for ds in ABS_DATE_RE.findall(text):
-        try:
-            dt_val = parser.parse(ds, fuzzy=True)
-            if dt_val not in unique:
-                unique.add(dt_val)
-                events.append((dt_val, ds))
-        except Exception:  # parser failed
-            pass
+    seen = set()
+    for line in iter_lines(text):
+        for m in re.finditer(r'\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+\s+\d{1,2},\s*\d{4})\b', line):
+            dt = parser.parse(m.group(0), fuzzy=True).date()
+            if dt not in seen:
+                seen.add(dt)
+                events.append((dt, line))   # ← keep the whole line
     return events
 
 
@@ -73,18 +73,14 @@ def find_event_context(text: str, keyword: str, window: int = 80) -> str:
 # Set this to 3 if your tutorials are every Thursday, etc.
 WEEKDAY_OFFSET = 0  # 0=Mon, 1=Tue, 2=Wed …
 
-def extract_week_based_events(text: str, semester_start: dt.date) -> list[tuple[dt.date, str]]:
-    """Map every "Week N" mention to a concrete calendar date."""
-    week_events = []
-    for match in WEEK_RE.finditer(text):
-        week_num = int(match.group(1))
-        # Monday of Week N (or use offset)
-        event_date = semester_start + dt.timedelta(weeks=week_num - 1)
-        if WEEKDAY_OFFSET:
-            event_date += dt.timedelta(days=WEEKDAY_OFFSET)
-        label = f"week {week_num}"
-        week_events.append((event_date, label))
-    return week_events
+def extract_week_based_events(text, semester_start, weekday_offset=0):
+    events = []
+    for line in iter_lines(text):
+        for m in re.finditer(r'\bweek\s*(\d{1,2})\b', line, re.I):
+            week = int(m.group(1))
+            date = semester_start + datetime.timedelta(weeks=week-1, days=weekday_offset)
+            events.append((date, line))
+    return events
 
 # ═══════════════════════════ .ics + PDF export ══════════════════════════
 
@@ -142,16 +138,13 @@ if uploaded_file and semester_start and semester_end:
         st.stop()
 
     # 3️⃣ Build DataFrame for display / export
-    df = (
-        pd.DataFrame(
-            {
-                "Date": [d.strftime("%Y-%m-%d") for d, _ in all_events],
-                "Event Description": [find_event_context(raw_text, lbl) for _, lbl in all_events],
-            }
-        )
-        .sort_values("Date")
-        .reset_index(drop=True)
-    )
+    calendar_df = pd.DataFrame(
+    {
+        "Date": [d.isoformat() for d, line in all_events],
+        "Event Description": [line for d, line in all_events],
+    }
+    ).drop_duplicates().sort_values("Date")
+
 
     # 4️⃣ Interactive calendar (FullCalendar)
     st.subheader("🗓️ Interactive Calendar")
