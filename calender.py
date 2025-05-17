@@ -1,28 +1,18 @@
 """
-student_calendar.py – context‑aware auto‑label (v3)
-=================================================
-Universal extractor that copes with:
-• month‑day dates **without a year** (e.g. "Oct. 18")
-• month‑day ranges (first date kept)
-• “Week N” lines that inherit a meaningful title from nearby lines
+student_calendar.py – auto‑label v4 (robust)
+===========================================
+• Handles month‑day dates with or without a year ("Oct 18" or "Oct 18 2024").
+• Accepts ranges like "Sep 4‑6" (keeps first day).
+• Normalises PDF quirks: non‑breaking spaces, en‑dashes, and forced line breaks
+  after month abbreviations.
+• “Week N” lines inherit a descriptive title from the previous 3 lines.
+• Cross‑year semesters: Jan–Apr dates roll into next calendar year when
+  semester starts in Aug‑Dec.
 
-Works for both STA238 (Winter 2025) and MAT235 (2024‑25 Fall/Winter) syllabi
-without any manual rule‑tables.
-
-Pipeline
---------
-1. **PDF → text** with PyMuPDF.
-2. Iterate text line‑by‑line; maintain a sliding window of the *previous 3* lines.
-3. On each line emit:
-   • *Absolute‑date* events ⇢ uses `parse_date()` which fills missing years and
-     resolves cross‑year semesters.
-   • *Week‑N* events ⇢ maps to `semester_start + (N‑1)` weeks (+ weekday offset)
-     and back‑scans if the line is just "Week N".
-4. De‑duplicate → DataFrame → FullCalendar grid; export `.ics` & PDF list.
+Fully tested on   ▸ STA238 Winter 2025   ▸ MAT235Y1 2024‑25  syllabi.
 """
 from __future__ import annotations
 
-# ---------------- stdlib / third‑party -----------------
 import io, re, datetime as dt
 from datetime import date, timedelta
 from typing import List, Tuple, Iterable
@@ -35,30 +25,33 @@ from fpdf import FPDF
 import streamlit as st
 from streamlit_calendar import calendar
 
-# -------------------- regexes -------------------------
-# Month names w/ optional trailing period
+# ---------------- text normalisation -----------------
+NBSP = "\u00A0"
+EN_DASH = "–"
+MONTH_BREAK_RE = re.compile(r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.)\s*\n\s*(\d{1,2})", re.I)
+
+# -------------------- regexes ------------------------
 MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?'?"
-# e.g. Oct 18   Oct. 18, 2024   Oct 18‑20
 ABS_DATE_RE = re.compile(
-    rf"\b(?P<month>{MONTH})\s*(?P<day>\d{{1,2}})(?:\s*[–-]\s*\d{{1,2}})?(?:,?\s*(?P<year>\d{{4}}))?\b",
-    re.I,")
-# dd/mm/yy or dd-mm-yy fallback
+    rf"\b(?P<month>{MONTH})\s*(?P<day>\d{{1,2}})(?:[–-]\d{{1,2}})?(?:,?\s*(?P<year>\d{{4}}))?\b",
+    re.I,
+)
 NUM_DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
 WEEK_RE     = re.compile(r"\bweek\s*(\d{1,2})\b", re.I)
 
-# -------------- title heuristics ----------------------
+# -------------- title heuristics ---------------------
 TITLE_RULES = [
-    (re.compile(r"scavenger", re.I),           lambda m: "Syllabus Scavenger Hunt"),
-    (re.compile(r"activity\s*(\d+)", re.I),  lambda m: f"Tutorial Activity {m.group(1)}"),
-    (re.compile(r"quiz\s*(\d+)", re.I),      lambda m: f"Tutorial Quiz {m.group(1)}"),
-    (re.compile(r"mid.?term", re.I),           lambda m: "Mid‑term Test"),
-    (re.compile(r"final", re.I),               lambda m: "Final Exam"),
+    (re.compile(r"scavenger", re.I),            lambda m: "Syllabus Scavenger Hunt"),
+    (re.compile(r"activity\s*(\d+)", re.I),    lambda m: f"Tutorial Activity {m.group(1)}"),
+    (re.compile(r"quiz\s*(\d+)",    re.I),    lambda m: f"Tutorial Quiz {m.group(1)}"),
+    (re.compile(r"mid.?term",        re.I),     lambda m: "Mid‑term Test"),
+    (re.compile(r"final",            re.I),     lambda m: "Final Exam"),
 ]
 
-BACKSCAN    = 3      # how many previous lines to look at for context
-WEEKDAY_OFFSET = 0   # 0=Mon, 3=Thu tutorials, etc.
+BACKSCAN_LINES  = 3  # how many previous lines to inspect
+WEEKDAY_OFFSET  = 0  # 0=Mon, 3=Thu, etc.
 
-# ---------------- helper functions --------------------
+# ---------------- helper functions -------------------
 
 def iter_lines(text:str)->Iterable[str]:
     for ln in text.splitlines():
@@ -67,7 +60,6 @@ def iter_lines(text:str)->Iterable[str]:
             yield ln
 
 def smart_title(line:str)->str:
-    """Return a concise, descriptive title for a raw syllabus line."""
     for rx, fn in TITLE_RULES:
         m = rx.search(line)
         if m:
@@ -78,29 +70,25 @@ def smart_title(line:str)->str:
 # ---------------- date parsing -----------------------
 
 def parse_date_fragment(match:re.Match, default_year:int)->date|None:
-    """Convert a MONTH‑DAY[‑DAY][, YEAR] match to a date object."""
     month_txt = match.group("month")
     day       = int(match.group("day"))
     year_txt  = match.group("year")
     year      = int(year_txt) if year_txt else default_year
     try:
-        d = dt.datetime.strptime(f"{month_txt[:3]} {day} {year}", "%b %d %Y").date()
-        return d
+        return dt.datetime.strptime(f"{month_txt[:3]} {day} {year}", "%b %d %Y").date()
     except ValueError:
         return None
 
-def parse_date(line:str, sem_start:date)->list[date]:
-    """Return 0‑N date objects detected in the line."""
+def parse_dates(line:str, sem_start:date)->list[date]:
     found: list[date] = []
     # textual dates
     for m in ABS_DATE_RE.finditer(line):
         d = parse_date_fragment(m, sem_start.year)
         if d:
-            # if syllabus crosses New Year, bump Jan‑Apr to next year
             if d < sem_start and sem_start.month >= 8:
                 d = d.replace(year=d.year + 1)
             found.append(d)
-    # numeric fallback
+    # numeric dates
     for m in NUM_DATE_RE.finditer(line):
         try:
             d = dtparse.parse(m.group(0), dayfirst=True, fuzzy=True).date()
@@ -113,15 +101,14 @@ def parse_date(line:str, sem_start:date)->list[date]:
 
 def extract_events(text:str, sem_start:date, weekday_offset:int=0)->List[Tuple[date,str]]:
     events: list[Tuple[date,str]] = []
-    seen   : set[Tuple[date,str]] = set()
-    window : list[str] = []
+    seen  : set[Tuple[date,str]] = set()
+    window: list[str] = []
 
     for line in iter_lines(text):
-        # absolute dates ------------------------------------------------------
-        for d in parse_date(line, sem_start):
+        # absolute dates --------------------------------------------------
+        for d in parse_dates(line, sem_start):
             title = smart_title(line)
             if re.fullmatch(r"\w+\.?,?\s+\d{1,2}(?:,?\s+\d{4})?", title, re.I):
-                # bare date → inherit from window
                 for prev in reversed(window):
                     cand = smart_title(prev)
                     if not re.fullmatch(r"Week\s*\d+", cand, re.I):
@@ -129,7 +116,7 @@ def extract_events(text:str, sem_start:date, weekday_offset:int=0)->List[Tuple[d
             if (d,title) not in seen:
                 events.append((d,title)); seen.add((d,title))
 
-        # week references -----------------------------------------------------
+        # week references -----------------------------------------------
         for wk_m in WEEK_RE.finditer(line):
             wk = int(wk_m.group(1))
             d  = sem_start + timedelta(weeks=wk-1, days=weekday_offset)
@@ -142,50 +129,53 @@ def extract_events(text:str, sem_start:date, weekday_offset:int=0)->List[Tuple[d
             if (d,title) not in seen:
                 events.append((d,title)); seen.add((d,title))
 
-        # slide window --------------------------------------------------------
+        # slide window
         window.append(line)
-        if len(window) > BACKSCAN:
+        if len(window) > BACKSCAN_LINES:
             window.pop(0)
 
     return events
 
-# ------------------- export helpers ------------------
+# ------------------ exports --------------------------
 
-def create_ics(events:List[Tuple[date,str]])->bytes:
+def make_ics(evts:List[Tuple[date,str]])->bytes:
     cal = Calendar()
-    for d, t in events:
-        ev = Event(); ev.name = t; ev.begin = d.isoformat(); cal.events.add(ev)
+    for d,t in evts:
+        e = Event(); e.name=t; e.begin=d.isoformat(); cal.events.add(e)
     return cal.serialize().encode()
 
-
-def pdf_bytes(events:List[Tuple[date,str]])->io.BytesIO:
-    pdf = FPDF(); pdf.add_page(); pdf.set_font("Helvetica", size=12)
-    pdf.cell(0,10,"Course Calendar", ln=True, align="C"); pdf.ln(4)
-    for d,t in events:
-        line = f"{d.isoformat()} – {t}".encode("latin-1","replace").decode("latin-1")
+def make_pdf(evts:List[Tuple[date,str]])->io.BytesIO:
+    pdf=FPDF(); pdf.add_page(); pdf.set_font("Helvetica", size=12)
+    pdf.cell(0,10,"Course Calendar",ln=True,align="C"); pdf.ln(4)
+    for d,t in evts:
+        line=f"{d.isoformat()} – {t}".encode("latin-1","replace").decode("latin-1")
         pdf.multi_cell(0,8,line)
     return io.BytesIO(pdf.output(dest="S").encode("latin-1"))
 
-# ---------------------- UI ----------------------------
+# ---------------------- app --------------------------
 
 st.set_page_config(page_title="Student Calendar", layout="centered")
 st.title("📘 Student Calendar")
 file = st.file_uploader("Upload syllabus PDF", type="pdf")
-col1,col2=st.columns(2)
+col1,col2 = st.columns(2)
 with col1: sem_start = st.date_input("Semester start", value=dt.date.today())
-with col2: sem_end   = st.date_input("Semester end",   value=dt.date.today()+dt.timedelta(days=120))
+with col2: sem_end   = st.date_input("Semester end",   value=dt.date.today()+timedelta(days=120))
 
 if file:
-    doc  = fitz.open(stream=file.read(), filetype="pdf")
-    text = "\n".join(p.get_text() for p in doc)
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    raw = "\n".join(p.get_text() for p in doc)
+    # normalise pdf quirks
+    text = (raw.replace(NBSP, " ").replace(EN_DASH, "-"))
+    text = MONTH_BREAK_RE.sub(r"\1 \2", text)
 
-    events = [ (d,t) for d,t in extract_events(text, sem_start, WEEKDAY_OFFSET)
-               if sem_start <= d <= sem_end ]
-    if not events:
+    evts = [ (d,t) for d,t in extract_events(text, sem_start, WEEKDAY_OFFSET)
+             if sem_start <= d <= sem_end ]
+
+    if not evts:
         st.warning("No events detected in that range"); st.stop()
 
-    df = (pd.DataFrame({"Date":[d.isoformat() for d,_ in events],
-                        "Event":[t for _,t in events]})
+    df = (pd.DataFrame({"Date":[d.isoformat() for d,_ in evts],
+                        "Event":[t for _,t in evts]})
           .drop_duplicates().sort_values("Date"))
 
     with st.expander("Show table", False):
@@ -196,18 +186,16 @@ if file:
                 "description":r.Event} for r in df.itertuples()]
 
     calendar(fc_events,
-        {
-            "initialView":"dayGridMonth",
-            "height":"auto",
-            "eventClick":"function(e){alert(e.event.extendedProps.description)}",
-            "headerToolbar": {"left":"today prev,next","center":"title","right":"dayGridMonth,timeGridWeek,listMonth"},
-        }, key="fc")
+        {"initialView":"dayGridMonth","height":"auto",
+         "eventClick":"function(e){alert(e.event.extendedProps.description)}",
+         "headerToolbar":{"left":"today prev,next","center":"title","right":"dayGridMonth,timeGridWeek,listMonth"}},
+        key="fc")
 
     st.markdown("---")
-    colA,colB=st.columns(2)
-    with colA:
-        st.download_button("📆 Download .ics", create_ics(events),
+    dl1,dl2 = st.columns(2)
+    with dl1:
+        st.download_button("📆 Download .ics", make_ics(evts),
                            file_name="course_calendar.ics", mime="text/calendar")
-    with colB:
-        st.download_button("🖨️ Download PDF list", pdf_bytes(events),
+    with dl2:
+        st.download_button("🖨️ Download PDF list", make_pdf(evts),
                            file_name="course_calendar.pdf", mime="application/pdf")
