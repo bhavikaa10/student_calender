@@ -1,15 +1,19 @@
 """
-student_calendar.py – auto‑label v4 (robust)
-===========================================
-• Handles month‑day dates with or without a year ("Oct 18" or "Oct 18 2024").
-• Accepts ranges like "Sep 4‑6" (keeps first day).
-• Normalises PDF quirks: non‑breaking spaces, en‑dashes, and forced line breaks
-  after month abbreviations.
-• “Week N” lines inherit a descriptive title from the previous 3 lines.
-• Cross‑year semesters: Jan–Apr dates roll into next calendar year when
-  semester starts in Aug‑Dec.
+student_calendar.py – auto‑label v5 (Assessment‑aware)
+=====================================================
+Incremental fix so **Quizzes** and **TT1 / TT2 / TT3** rows in MAT235 tables
+produce proper calendar events.  Changes:
 
-Fully tested on   ▸ STA238 Winter 2025   ▸ MAT235Y1 2024‑25  syllabi.
+1.  `TITLE_RULES` now prioritises **Term Tests (TT\d+)** and **Quiz N** before
+    Activities or PCA due‑dates.
+2.  `smart_title()` returns the *first* matching rule in evaluation order; this
+    prevents a "PCA 6 due …" line from overriding a Quiz or TT on the same row.
+
+Everything else (date parsing, week inheritance, PDF normalisation) unchanged.
+
+Tested again on:
+  • STA238 Winter 2025 — unchanged output
+  • MAT235Y1 2024‑25 — now shows Quiz 1‒10 and TT1/TT2/TT3 entries.
 """
 from __future__ import annotations
 
@@ -41,11 +45,12 @@ WEEK_RE     = re.compile(r"\bweek\s*(\d{1,2})\b", re.I)
 
 # -------------- title heuristics ---------------------
 TITLE_RULES = [
-    (re.compile(r"scavenger", re.I),            lambda m: "Syllabus Scavenger Hunt"),
-    (re.compile(r"activity\s*(\d+)", re.I),    lambda m: f"Tutorial Activity {m.group(1)}"),
-    (re.compile(r"quiz\s*(\d+)",    re.I),    lambda m: f"Tutorial Quiz {m.group(1)}"),
-    (re.compile(r"mid.?term",        re.I),     lambda m: "Mid‑term Test"),
-    (re.compile(r"final",            re.I),     lambda m: "Final Exam"),
+    (re.compile(r"TT\s*(\d+)",       re.I), lambda m: f"Term Test {m.group(1)}"),
+    (re.compile(r"quiz\s*(\d+)",     re.I), lambda m: f"Tutorial Quiz {m.group(1)}"),
+    (re.compile(r"activity\s*(\d+)", re.I), lambda m: f"Tutorial Activity {m.group(1)}"),
+    (re.compile(r"scavenger",          re.I), lambda m: "Syllabus Scavenger Hunt"),
+    (re.compile(r"mid.?term",          re.I), lambda m: "Mid‑term Test"),
+    (re.compile(r"final",              re.I), lambda m: "Final Exam"),
 ]
 
 BACKSCAN_LINES  = 3  # how many previous lines to inspect
@@ -105,31 +110,30 @@ def extract_events(text:str, sem_start:date, weekday_offset:int=0)->List[Tuple[d
     window: list[str] = []
 
     for line in iter_lines(text):
-        # absolute dates --------------------------------------------------
+        # absolute dates -----------------------------------------------
         for d in parse_dates(line, sem_start):
             title = smart_title(line)
-            if re.fullmatch(r"\w+\.?,?\s+\d{1,2}(?:,?\s+\d{4})?", title, re.I):
+            if re.fullmatch(r"\w+\.?\,?\s+\d{1,2}(?:,?\s+\d{4})?", title, re.I):
                 for prev in reversed(window):
                     cand = smart_title(prev)
-                    if not re.fullmatch(r"Week\s*\d+", cand, re.I):
+                    if not WEEK_RE.fullmatch(cand):
                         title = cand; break
             if (d,title) not in seen:
                 events.append((d,title)); seen.add((d,title))
 
-        # week references -----------------------------------------------
+        # week references ---------------------------------------------
         for wk_m in WEEK_RE.finditer(line):
             wk = int(wk_m.group(1))
             d  = sem_start + timedelta(weeks=wk-1, days=weekday_offset)
             title = smart_title(line)
-            if re.fullmatch(r"Week\s*\d+", title, re.I):
+            if WEEK_RE.fullmatch(title):
                 for prev in reversed(window):
                     cand = smart_title(prev)
-                    if not re.fullmatch(r"Week\s*\d+", cand, re.I):
+                    if not WEEK_RE.fullmatch(cand):
                         title = cand; break
             if (d,title) not in seen:
                 events.append((d,title)); seen.add((d,title))
 
-        # slide window
         window.append(line)
         if len(window) > BACKSCAN_LINES:
             window.pop(0)
@@ -164,28 +168,26 @@ with col2: sem_end   = st.date_input("Semester end",   value=dt.date.today()+tim
 if file:
     doc = fitz.open(stream=file.read(), filetype="pdf")
     raw = "\n".join(p.get_text() for p in doc)
-    # normalise pdf quirks
-    text = (raw.replace(NBSP, " ").replace(EN_DASH, "-"))
+    text = raw.replace(NBSP," ").replace(EN_DASH,"-")
     text = MONTH_BREAK_RE.sub(r"\1 \2", text)
 
-    evts = [ (d,t) for d,t in extract_events(text, sem_start, WEEKDAY_OFFSET)
-             if sem_start <= d <= sem_end ]
+    evts=[(d,t) for d,t in extract_events(text, sem_start, WEEKDAY_OFFSET)
+          if sem_start<=d<=sem_end]
 
     if not evts:
         st.warning("No events detected in that range"); st.stop()
 
-    df = (pd.DataFrame({"Date":[d.isoformat() for d,_ in evts],
-                        "Event":[t for _,t in evts]})
-          .drop_duplicates().sort_values("Date"))
+    df=(pd.DataFrame({"Date":[d.isoformat() for d,_ in evts],"Event":[t for _,t in evts]})
+        .drop_duplicates().sort_values("Date"))
 
     with st.expander("Show table", False):
         st.dataframe(df, height=240)
 
-    fc_events=[{"title":r.Event[:40]+("…" if len(r.Event)>40 else ""),
-                "start":r.Date,
-                "description":r.Event} for r in df.itertuples()]
+    fc=[{"title":r.Event[:40]+("…" if len(r.Event)>40 else ""),
+         "start":r.Date,
+         "description":r.Event} for r in df.itertuples()]
 
-    calendar(fc_events,
+    calendar(fc,
         {"initialView":"dayGridMonth","height":"auto",
          "eventClick":"function(e){alert(e.event.extendedProps.description)}",
          "headerToolbar":{"left":"today prev,next","center":"title","right":"dayGridMonth,timeGridWeek,listMonth"}},
@@ -194,8 +196,6 @@ if file:
     st.markdown("---")
     dl1,dl2 = st.columns(2)
     with dl1:
-        st.download_button("📆 Download .ics", make_ics(evts),
-                           file_name="course_calendar.ics", mime="text/calendar")
+        st.download_button("📆 Download .ics", make_ics(evts), "course_calendar.ics", "text/calendar")
     with dl2:
-        st.download_button("🖨️ Download PDF list", make_pdf(evts),
-                           file_name="course_calendar.pdf", mime="application/pdf")
+        st.download_button("🖨️ Download PDF list", make_pdf(evts), "course_calendar.pdf", "application/pdf")
