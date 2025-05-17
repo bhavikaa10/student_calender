@@ -78,7 +78,7 @@ def extract_week_based_events(text, semester_start, weekday_offset=0):
     for line in iter_lines(text):
         for m in re.finditer(r'\bweek\s*(\d{1,2})\b', line, re.I):
             week = int(m.group(1))
-            date = semester_start + datetime.timedelta(weeks=week-1, days=weekday_offset)
+            date = semester_start + dt.timedelta(weeks=week-1, days=weekday_offset)
             events.append((date, line))
     return events
 
