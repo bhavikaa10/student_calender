@@ -114,7 +114,7 @@ def pdf_bytes(events:List[Tuple[date,str]])->io.BytesIO:
 
 # -------------------- Streamlit UI -----------------------------
 
-st.title("📘 Syllabus → Smart Calendar (context scan)")
+st.title("📘 Student Calendar")
 file = st.file_uploader("Upload syllabus PDF", type="pdf")
 col1,col2=st.columns(2)
 with col1:  sem_start = st.date_input("Semester start", value=dt.date(2025,1,6))
@@ -134,7 +134,7 @@ if file:
         st.dataframe(df, height=240)
 
     fc_events=[{"title":row.Event,"start":row.Date,"description":row.Event} for row in df.itertuples()]
-    _=calendar(fc_events,{"initialView":"dayGridMonth","height":"auto","eventClick":"function(i){alert(i.event.extendedProps.description);}"},key="fc")
+    _=calendar(fc_events,{"initialView":"dayGridMonth","height":"auto","eventClick":"function(i){alert(i.event.extendedProps.description);} "},key="fc")
 
     st.markdown("---")
     colA,colB=st.columns(2)
