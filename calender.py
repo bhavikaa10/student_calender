@@ -150,9 +150,9 @@ if uploaded_file and semester_start and semester_end:
     st.subheader("🗓️ Interactive Calendar")
 
     with st.expander("Show raw event table", expanded=False):
-        st.dataframe(df, height=300)
+        st.dataframe(calendar_df, height=300)
 
-    events_json = df_to_fullcalendar(df)
+    events_json = df_to_fullcalendar(calendar_df)
 
     # Basic FC options; tweak as needed
     cal_options = {
