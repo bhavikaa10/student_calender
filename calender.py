@@ -159,7 +159,7 @@ def make_pdf(evts:List[Tuple[date,str]])->io.BytesIO:
 # ---------------------- app --------------------------
 
 st.set_page_config(page_title="Student Calendar", layout="centered")
-st.title("📘 Student Calendar")
+st.title("Student Calendar")
 file = st.file_uploader("Upload syllabus PDF", type="pdf")
 col1,col2 = st.columns(2)
 with col1: sem_start = st.date_input("Semester start", value=dt.date.today())
