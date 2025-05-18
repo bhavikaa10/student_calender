@@ -1,9 +1,9 @@
 """
-student_calendar.py – v6.2 (PDF‑unicode + null‑title fixes)
-=========================================================
-• Fixes **UnicodeEncodeError: 'latin-1' codec** when exporting PDF.
-• Guarantees every event has a non‑blank title (no more “None”).
-• Minor: auto‑page‑break in PDF, safer type casting in calendar JSON.
+student_calendar.py – v6.3 (FullCalendar visibility fix)
+=======================================================
+• Adds `allDay: True` **and** ensures `start` is an ISO string → events now
+  render inside the month grid instead of disappearing.
+• Kept all v6.2 Unicode / title safeguards.
 """
 
 from __future__ import annotations
@@ -191,7 +191,8 @@ if pdf_file:
     fc_events = [
         {
             "title": str(r.Event)[:40] + ("…" if len(str(r.Event)) > 40 else ""),
-            "start": r.Date,
+            "start": str(r.Date),      # ISO string mandatory
+            "allDay": True,            # ensure it shows in month view
             "description": str(r.Event),
         }
         for r in df.itertuples()
