@@ -125,9 +125,16 @@ def make_ics(evts):
     return cal.serialize().encode()
 
 def make_pdf(evts):
-    pdf=FPDF(); pdf.add_page(); pdf.set_font("Helvetica",size=12)
-    pdf.cell(0,10,"Course Calendar",ln=True,align="C"); pdf.ln(4)
-    for d,t in evts: pdf.multi_cell(0,8,f"{d} – {t}")
+    """Return BytesIO of PDF list; each line is latin‑1‑safe to avoid
+    UnicodeEncodeError on Streamlit Cloud."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+    pdf.cell(0, 10, "Course Calendar", ln=True, align="C")
+    pdf.ln(4)
+    for d, t in evts:
+        safe = f"{d} – {t}".encode("latin-1", "replace").decode("latin-1")
+        pdf.multi_cell(0, 8, safe)
     return io.BytesIO(pdf.output(dest="S").encode("latin-1"))
 
 # ░░ Streamlit UI (minor cosmetic tweak) ░░
