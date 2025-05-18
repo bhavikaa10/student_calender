@@ -1,7 +1,7 @@
 streamlit
-streamlit-calendar
 PyMuPDF
 python-dateutil
 ics
 fpdf
 pandas
+streamlit-calendar>=1.3.1
