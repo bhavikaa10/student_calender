@@ -19,6 +19,10 @@ from ics import Calendar, Event
 from fpdf import FPDF
 import streamlit as st
 from streamlit_calendar import calendar
+import openai
+import os
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # ░░ Semester Detection ░░
 SEMESTER_PATTERNS = [
