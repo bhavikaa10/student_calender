@@ -1,16 +1,17 @@
 """
-student_calendar.py – v6.3 (FullCalendar visibility fix)
+student_calendar.py – v6.4 (UofT Academic Calendar Integration)
 =======================================================
-• Adds `allDay: True` **and** ensures `start` is an ISO string → events now
-  render inside the month grid instead of disappearing.
-• Kept all v6.2 Unicode / title safeguards.
+• Added semester detection from syllabus
+• Added UofT academic calendar integration
+• Added holiday and break detection
 """
 
 from __future__ import annotations
 import io, re, datetime as dt
 from datetime import date, timedelta
 from typing import List, Tuple, Iterable
-
+import requests
+from bs4 import BeautifulSoup
 import fitz  # PyMuPDF
 import pandas as pd
 from dateutil import parser as dtparse
@@ -18,6 +19,49 @@ from ics import Calendar, Event
 from fpdf import FPDF
 import streamlit as st
 from streamlit_calendar import calendar
+
+# ░░ Semester Detection ░░
+SEMESTER_PATTERNS = [
+    (re.compile(r"(?:fall|autumn)\s*(?:semester|term|session)", re.I), "F"),
+    (re.compile(r"(?:winter)\s*(?:semester|term|session)", re.I), "S"),
+    (re.compile(r"(?:summer)\s*(?:semester|term|session)", re.I), "Y"),
+]
+
+def detect_semester(text: str) -> str:
+    """Detect semester from syllabus text."""
+    for pattern, semester in SEMESTER_PATTERNS:
+        if pattern.search(text):
+            return semester
+    return None
+
+# ░░ UofT Academic Calendar Integration ░░
+UOFT_CALENDAR_URL = "https://www.artsci.utoronto.ca/current/dates-deadlines/academic-dates"
+
+def fetch_uoft_calendar() -> List[Tuple[date, str]]:
+    """Fetch and parse UofT academic calendar."""
+    try:
+        response = requests.get(UOFT_CALENDAR_URL)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        events = []
+        
+        # Find all tables in the page
+        tables = soup.find_all('table')
+        for table in tables:
+            rows = table.find_all('tr')
+            for row in rows:
+                cols = row.find_all('td')
+                if len(cols) >= 2:
+                    date_str = cols[0].get_text().strip()
+                    event_desc = cols[1].get_text().strip()
+                    try:
+                        event_date = dtparse.parse(date_str).date()
+                        events.append((event_date, event_desc))
+                    except:
+                        continue
+        return events
+    except Exception as e:
+        st.error(f"Error fetching UofT calendar: {str(e)}")
+        return []
 
 # ░░ PDF normalisation ░░
 NBSP = "\u00A0"; EN_DASH = "–"
@@ -79,9 +123,9 @@ def smart_title(line: str) -> str:
 def _abs_date(m: re.Match, year: int, start: date) -> date | None:
     # Try different capture groups
     for i in range(1, 4):
-        month = m.group(f'month{i}') or m.group(f'month')
-        day = m.group(f'day{i}') or m.group(f'day')
-        yr = m.group(f'year{i}') or m.group(f'year')
+        month = m.groupdict().get(f'month{i}') or m.groupdict().get('month')
+        day = m.groupdict().get(f'day{i}') or m.groupdict().get('day')
+        yr = m.groupdict().get(f'year{i}') or m.groupdict().get('year')
         
         if month and day:
             month = month[:3]  # Normalize month name
@@ -129,6 +173,19 @@ def parse_dates(line: str, start: date) -> list[date]:
 def extract_events(text: str, start: date, offset: int = 0) -> List[Tuple[date, str]]:
     evts, seen, window = [], set(), []
     lines = list(iter_lines(text))
+    
+    # Detect semester
+    semester = detect_semester(text)
+    if semester:
+        st.info(f"Detected {semester} semester")
+        
+        # Fetch UofT calendar events
+        uoft_events = fetch_uoft_calendar()
+        for d, t in uoft_events:
+            if start <= d <= end:
+                evts.append((d, f"UofT: {t}"))
+                seen.add((d, t))
+
     for idx, line in enumerate(lines):
         buffer = lines[idx + 1: idx + 1 + LOOKAHEAD_LINES]
 
@@ -215,6 +272,12 @@ if pdf_file:
     if not evts:
         st.warning("No events detected in that range")
         st.stop()
+
+    # Add UofT calendar events
+    uoft_events = fetch_uoft_calendar()
+    for d, t in uoft_events:
+        if start <= d <= end:
+            evts.append((d, f"UofT: {t}"))
 
     df = (
         pd.DataFrame({"Date": [d.isoformat() for d, _ in evts], "Event": [t for _, t in evts]})
