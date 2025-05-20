@@ -10,8 +10,6 @@ from __future__ import annotations
 import io, re, datetime as dt
 from datetime import date, timedelta
 from typing import List, Tuple, Iterable
-import requests
-from bs4 import BeautifulSoup
 import fitz  # PyMuPDF
 import pandas as pd
 from dateutil import parser as dtparse
@@ -37,35 +35,6 @@ def detect_semester(text: str) -> str:
         if pattern.search(text):
             return semester
     return None
-
-# ░░ UofT Academic Calendar Integration ░░
-UOFT_CALENDAR_URL = "https://www.artsci.utoronto.ca/current/dates-deadlines/academic-dates"
-
-def fetch_uoft_calendar() -> List[Tuple[date, str]]:
-    """Fetch and parse UofT academic calendar."""
-    try:
-        response = requests.get(UOFT_CALENDAR_URL)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        events = []
-        
-        # Find all tables in the page
-        tables = soup.find_all('table')
-        for table in tables:
-            rows = table.find_all('tr')
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 2:
-                    date_str = cols[0].get_text().strip()
-                    event_desc = cols[1].get_text().strip()
-                    try:
-                        event_date = dtparse.parse(date_str).date()
-                        events.append((event_date, event_desc))
-                    except:
-                        continue
-        return events
-    except Exception as e:
-        st.error(f"Error fetching UofT calendar: {str(e)}")
-        return []
 
 # ░░ PDF normalisation ░░
 NBSP = "\u00A0"; EN_DASH = "–"
@@ -183,13 +152,6 @@ def extract_events(text: str, start: date, offset: int = 0) -> List[Tuple[date, 
     if semester:
         st.info(f"Detected {semester} semester")
         
-        # Fetch UofT calendar events
-        uoft_events = fetch_uoft_calendar()
-        for d, t in uoft_events:
-            if start <= d <= end:
-                evts.append((d, f"UofT: {t}"))
-                seen.add((d, t))
-
     for idx, line in enumerate(lines):
         buffer = lines[idx + 1: idx + 1 + LOOKAHEAD_LINES]
 
