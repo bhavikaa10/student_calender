@@ -257,6 +257,41 @@ def make_pdf(evts: list[tuple[date, str]]):
     # Return BytesIO so Streamlit can send it directly
     return io.BytesIO(pdf.output(dest="S").encode('latin-1', 'replace'))
 
+def extract_events_llm(text: str) -> list[tuple[str, str]]:
+    """
+    Use OpenAI LLM to extract (date, event description) pairs from syllabus text.
+    Dates should be in YYYY-MM-DD format if possible.
+    """
+    prompt = (
+        "Extract all important dates and events from the following syllabus text. "
+        "Return a Python list of (date, event description) tuples. "
+        "Dates should be in YYYY-MM-DD format if possible. "
+        "If a date is ambiguous, use your best guess based on context.\n\n"
+        f"Syllabus:\n{text}\n\n"
+        "List of events:"
+    )
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",  # or "gpt-4" if you have access
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1000,
+        temperature=0.2,
+    )
+    import ast
+    try:
+        events = ast.literal_eval(response.choices[0].message['content'])
+        return events
+    except Exception:
+        # Fallback: try to parse line by line
+        lines = response.choices[0].message['content'].splitlines()
+        events = []
+        for line in lines:
+            if "-" in line:
+                parts = line.split("-", 1)
+                date = parts[0].strip()
+                desc = parts[1].strip()
+                events.append((date, desc))
+        return events
+
 # ░░ Streamlit UI ░░
 st.set_page_config(page_title="Student Calendar", layout="centered")
 st.title("📘 Student Calendar")
@@ -270,21 +305,23 @@ with c2:
 
 if pdf_file:
     raw_text = "\n".join(p.get_text() for p in fitz.open(stream=pdf_file.read(), filetype="pdf"))
-    cleaned = MONTH_BRK.sub(r"\1 \2", raw_text.replace(NBSP, " ").replace(EN_DASH, "-"))
-
-    evts = [(d, t) for d, t in extract_events(cleaned, start, WEEKDAY_OFFSET) if start <= d <= end]
-    if not evts:
+    st.info("Extracting events using AI...")
+    evts = extract_events_llm(raw_text)
+    # Filter events by date range
+    filtered_evts = []
+    for d, t in evts:
+        try:
+            d_obj = dtparse.parse(d).date()
+            if start <= d_obj <= end:
+                filtered_evts.append((d_obj, t))
+        except Exception:
+            continue
+    if not filtered_evts:
         st.warning("No events detected in that range")
         st.stop()
 
-    # Add UofT calendar events
-    uoft_events = fetch_uoft_calendar()
-    for d, t in uoft_events:
-        if start <= d <= end:
-            evts.append((d, f"UofT: {t}"))
-
     df = (
-        pd.DataFrame({"Date": [d.isoformat() for d, _ in evts], "Event": [t for _, t in evts]})
+        pd.DataFrame({"Date": [d.isoformat() for d, _ in filtered_evts], "Event": [t for _, t in filtered_evts]})
         .drop_duplicates()
         .sort_values("Date")
     )
@@ -319,6 +356,6 @@ if pdf_file:
 
     c3, c4 = st.columns(2)
     with c3:
-        st.download_button("📆 Download .ics", make_ics(evts), "course_calendar.ics", "text/calendar")
+        st.download_button("📆 Download .ics", make_ics(filtered_evts), "course_calendar.ics", "text/calendar")
     with c4:
-        st.download_button("🖨️ Download PDF", make_pdf(evts), "course_calendar.pdf", "application/pdf")
+        st.download_button("🖨️ Download PDF", make_pdf(filtered_evts), "course_calendar.pdf", "application/pdf")
