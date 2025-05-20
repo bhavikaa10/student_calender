@@ -25,9 +25,20 @@ MONTH_BRK = re.compile(r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|De
 
 # ░░ Regexes ░░
 MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
-ABS_RE = re.compile(rf"\b(?P<month>{MONTH})\s*(?P<day>\d{{1,2}})(?:[–-]\d{{1,2}})?(?:,?\s*(?P<year>\d{{4}}))?\b", re.I)
-NUM_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
-WEEK_RE = re.compile(r"\bweek\s*(\d{1,2})\b", re.I)
+ABS_RE = re.compile(rf"""
+    \b(?:
+        (?P<month>{MONTH})\s*(?P<day>\d{{1,2}})(?:[–-]\d{{1,2}})?(?:,?\s*(?P<year>\d{{4}}))?  # Jan 15, 2024
+        |(?P<day2>\d{{1,2}})\s+(?P<month2>{MONTH})(?:,?\s*(?P<year2>\d{{4}}))?              # 15 Jan 2024
+        |(?P<month3>{MONTH})\s*(?P<day3>\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(?P<year3>\d{{4}}))?  # January 15th, 2024
+    )\b
+""", re.I | re.X)
+NUM_RE = re.compile(r"""
+    \b(?:
+        \d{1,2}[/-]\d{1,2}[/-]\d{2,4}  # 01/15/2024 or 1-15-24
+        |\d{4}[/-]\d{1,2}[/-]\d{1,2}   # 2024/01/15
+    )\b
+""", re.X)
+WEEK_RE = re.compile(r"\b(?:week|wk)\s*(\d{1,2})\b", re.I)
 
 # ░░ Title heuristics ░░
 TITLE_RULES = [
@@ -36,6 +47,10 @@ TITLE_RULES = [
     (re.compile(r"activity\s*(\d+)", re.I), lambda m: f"Tutorial Activity {m.group(1)}"),
     (re.compile(r"PCA\s*(\d+)", re.I),     lambda m: f"PCA {m.group(1)} due"),
     (re.compile(r"scavenger", re.I),         lambda _: "Syllabus Scavenger Hunt"),
+    (re.compile(r"assignment\s*(\d+)", re.I), lambda m: f"Assignment {m.group(1)} due"),
+    (re.compile(r"project\s*(\d+)", re.I),   lambda m: f"Project {m.group(1)} due"),
+    (re.compile(r"midterm", re.I),           lambda _: "Midterm Exam"),
+    (re.compile(r"final\s*exam", re.I),      lambda _: "Final Exam"),
 ]
 BACKSCAN_LINES = 3
 LOOKAHEAD_LINES = 4
@@ -62,27 +77,49 @@ def smart_title(line: str) -> str:
 # ░░ Date parsing ░░
 
 def _abs_date(m: re.Match, year: int, start: date) -> date | None:
-    month = m.group('month')[:3]
-    day = int(m.group('day'))
-    yr = int(m.group('year')) if m.group('year') else year
-    try:
-        d = dt.datetime.strptime(f"{month} {day} {yr}", "%b %d %Y").date()
-        # rollover for Fall terms where year isn’t specified
-        if d < start and start.month >= 8 and not m.group('year'):
-            d = d.replace(year=d.year + 1)
-        return d
-    except Exception:
-        return None
+    # Try different capture groups
+    for i in range(1, 4):
+        month = m.group(f'month{i}') or m.group(f'month')
+        day = m.group(f'day{i}') or m.group(f'day')
+        yr = m.group(f'year{i}') or m.group(f'year')
+        
+        if month and day:
+            month = month[:3]  # Normalize month name
+            day = int(day)
+            yr = int(yr) if yr else year
+            
+            try:
+                d = dt.datetime.strptime(f"{month} {day} {yr}", "%b %d %Y").date()
+                # rollover for Fall terms where year isn't specified
+                if d < start and start.month >= 8 and not yr:
+                    d = d.replace(year=d.year + 1)
+                return d
+            except Exception:
+                continue
+    return None
 
 def parse_dates(line: str, start: date) -> list[date]:
     out = []
+    # Try absolute dates
     for m in ABS_RE.finditer(line):
         d = _abs_date(m, start.year, start)
         if d:
             out.append(d)
+    
+    # Try numerical dates
     for m in NUM_RE.finditer(line):
         try:
-            out.append(dtparse.parse(m.group(0), dayfirst=True).date())
+            # Try different date formats
+            for fmt in ["%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y", "%m-%d-%Y", "%Y-%m-%d"]:
+                try:
+                    d = dt.datetime.strptime(m.group(0), fmt).date()
+                    # Handle 2-digit years
+                    if d.year < 100:
+                        d = d.replace(year=2000 + d.year)
+                    out.append(d)
+                    break
+                except ValueError:
+                    continue
         except Exception:
             pass
     return out
